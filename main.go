@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"io"
 	"log/syslog"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"math/rand"
 
 	"github.com/bradfitz/gomemcache/memcache"
 )
@@ -31,7 +31,7 @@ type ProxyServer struct {
 	accountRing   Ring
 	client        *http.Client
 	logger        *syslog.Writer
-	mc			  *memcache.Client
+	mc            *memcache.Client
 }
 
 type RequestContext struct {
@@ -55,9 +55,9 @@ func CopyResponseHeaders(src *http.Response, dst http.ResponseWriter) {
 }
 
 type ResultSet struct {
-  	client *http.Client
-  	requests []*http.Request
-	done []chan int
+	client   *http.Client
+	requests []*http.Request
+	done     []chan int
 }
 
 func _DoRequest(client *http.Client, req *http.Request, done chan int) {
@@ -79,19 +79,19 @@ func _DoRequest(client *http.Client, req *http.Request, done chan int) {
 }
 
 func (rs *ResultSet) Do(req *http.Request) {
-  donech := make(chan int)
-  rs.requests = append(rs.requests, req)
-  rs.done = append(rs.done, donech)
-  go _DoRequest(rs.client, req, donech)
+	donech := make(chan int)
+	rs.requests = append(rs.requests, req)
+	rs.done = append(rs.done, donech)
+	go _DoRequest(rs.client, req, donech)
 }
 
 func (rs ResultSet) BestResponse(writer http.ResponseWriter) {
-  var responses []int
-  for _, done := range rs.done {
-	responses = append(responses, <- done)
-  }
-  response := responses[0]  // TODO quorum
-  http.Error(writer, http.StatusText(response), response)
+	var responses []int
+	for _, done := range rs.done {
+		responses = append(responses, <-done)
+	}
+	response := responses[0] // TODO quorum
+	http.Error(writer, http.StatusText(response), response)
 }
 
 func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
@@ -101,7 +101,7 @@ func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *
 			Urlencode(vars["account"]), Urlencode(vars["container"]), Urlencode(vars["obj"]))
 		req, err := http.NewRequest(request.Method, url, nil)
 		if err != nil {
-		  	fmt.Println(err)
+			fmt.Println(err)
 			continue
 		}
 		request.CopyRequestHeaders(req)
@@ -110,7 +110,7 @@ func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *
 			defer resp.Body.Close()
 		}
 		if err != nil {
-		  	fmt.Println(err)
+			fmt.Println(err)
 		}
 		if err == nil && (resp.StatusCode/100) == 2 {
 			CopyResponseHeaders(resp, writer)
@@ -269,9 +269,9 @@ func (server ProxyServer) AccountDeleteHandler(writer http.ResponseWriter, reque
 }
 
 func (server ProxyServer) AuthHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
-  	token := make([]byte, 32)
+	token := make([]byte, 32)
 	for i := range token {
-	  token[i] = byte('A' + (rand.Int() % 26))
+		token[i] = byte('A' + (rand.Int() % 26))
 	}
 	user := request.Header.Get("X-Auth-User")
 	key := fmt.Sprintf("auth/AUTH_%s/%s", user, string(token))
@@ -367,24 +367,24 @@ func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 	}
 
-	LogRequest:
-	  logline := fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
-		  request.RemoteAddr,
-		  time.Now().Format("02/Jan/2006:15:04:05 -0700"),
-		  request.Method,
-		  request.URL.Path,
-		  newWriter.Status,
-		  GetDefault(writer.Header(), "Content-Length", "-"),
-		  GetDefault(request.Header, "Referer", "-"),
-		  newRequest.TransactionId,
-		  GetDefault(request.Header, "User-Agent", "-"),
-		  time.Since(start).Seconds(),
-		  "-")
-	  server.logger.Info(logline) // TODO: "additional info"
+LogRequest:
+	logline := fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
+		request.RemoteAddr,
+		time.Now().Format("02/Jan/2006:15:04:05 -0700"),
+		request.Method,
+		request.URL.Path,
+		newWriter.Status,
+		GetDefault(writer.Header(), "Content-Length", "-"),
+		GetDefault(request.Header, "Referer", "-"),
+		newRequest.TransactionId,
+		GetDefault(request.Header, "User-Agent", "-"),
+		time.Since(start).Seconds(),
+		"-")
+	server.logger.Info(logline) // TODO: "additional info"
 }
 
 func RunServer(conf string) {
-  	rand.Seed(time.Now().Unix())
+	rand.Seed(time.Now().Unix())
 	server := ProxyServer{}
 
 	transport := http.Transport{
