@@ -15,18 +15,6 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 )
 
-// ResponseWriter that saves its status - used for logging.
-
-type SaveStatusWriter struct {
-	http.ResponseWriter
-	Status int
-}
-
-func (w *SaveStatusWriter) WriteHeader(status int) {
-	w.ResponseWriter.WriteHeader(status)
-	w.Status = status
-}
-
 type ProxyServer struct {
 	objectRing    Ring
 	containerRing Ring
@@ -36,27 +24,39 @@ type ProxyServer struct {
 	mc            *memcache.Client
 }
 
+// ResponseWriter that saves its status - used for logging.
+
+type SwiftWriter struct {
+	http.ResponseWriter
+	Status int
+}
+
+func (w *SwiftWriter) WriteHeader(status int) {
+	w.ResponseWriter.WriteHeader(status)
+	w.Status = status
+}
+
+func (w *SwiftWriter) CopyResponseHeaders(src *http.Response) {
+	for key := range src.Header {
+		w.Header().Set(key, src.Header.Get(key))
+	}
+}
+
 // http.Request that also contains swift-specific info about the request
 
-type RequestContext struct {
+type SwiftRequest struct {
 	*http.Request
 	TransactionId string
 	XTimestamp    string
 	Start         time.Time
 }
 
-func (src *RequestContext) CopyRequestHeaders(dst *http.Request) {
+func (src *SwiftRequest) CopyRequestHeaders(dst *http.Request) {
 	for key := range src.Header {
 		dst.Header.Set(key, src.Header.Get(key))
 	}
 	dst.Header.Set("X-Timestamp", src.XTimestamp)
 	dst.Header.Set("X-Trans-Id", src.TransactionId)
-}
-
-func CopyResponseHeaders(src *http.Response, dst http.ResponseWriter) {
-	for key := range src.Header {
-		dst.Header().Set(key, src.Header.Get(key))
-	}
 }
 
 // object that performs some number of requests asynchronously and aggregates the results
@@ -90,7 +90,7 @@ func (rs *ResultSet) Do(req *http.Request) {
 	}(rs.client, req, donech)
 }
 
-func (rs ResultSet) BestResponse(writer http.ResponseWriter) {
+func (rs ResultSet) BestResponse(writer *SwiftWriter) {
 	var responses []int
 	for _, done := range rs.done {
 		responses = append(responses, <-done)
@@ -101,7 +101,7 @@ func (rs ResultSet) BestResponse(writer http.ResponseWriter) {
 
 // request handlers
 
-func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ObjectGetHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
 	for _, device := range server.objectRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
@@ -120,7 +120,7 @@ func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *
 			fmt.Println(err)
 		}
 		if err == nil && (resp.StatusCode/100) == 2 {
-			CopyResponseHeaders(resp, writer)
+			writer.CopyResponseHeaders(resp)
 			writer.WriteHeader(resp.StatusCode)
 			if request.Method == "GET" {
 				io.Copy(writer, resp.Body)
@@ -132,7 +132,7 @@ func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *
 	}
 }
 
-func (server ProxyServer) ObjectPutHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
 	container_partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	container_devices := server.containerRing.GetNodes(container_partition)
@@ -177,7 +177,7 @@ func (server ProxyServer) ObjectPutHandler(writer http.ResponseWriter, request *
 	resultSet.BestResponse(writer)
 }
 
-func (server ProxyServer) ObjectDeleteHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ObjectDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
 	rs := ResultSet{server.client, nil, nil}
 	for _, device := range server.objectRing.GetNodes(partition) {
@@ -190,7 +190,7 @@ func (server ProxyServer) ObjectDeleteHandler(writer http.ResponseWriter, reques
 	rs.BestResponse(writer)
 }
 
-func (server ProxyServer) ContainerGetHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ContainerGetHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	for _, device := range server.containerRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s?%s", device.Ip, device.Port, device.Device, partition,
@@ -208,7 +208,7 @@ func (server ProxyServer) ContainerGetHandler(writer http.ResponseWriter, reques
 			defer resp.Body.Close()
 		}
 		if err == nil && (resp.StatusCode/100) == 2 {
-			CopyResponseHeaders(resp, writer)
+			writer.CopyResponseHeaders(resp)
 			writer.WriteHeader(http.StatusOK)
 			if request.Method == "GET" {
 				io.Copy(writer, resp.Body)
@@ -220,7 +220,7 @@ func (server ProxyServer) ContainerGetHandler(writer http.ResponseWriter, reques
 	}
 }
 
-func (server ProxyServer) ContainerPutHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ContainerPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	rs := ResultSet{server.client, nil, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
@@ -233,7 +233,7 @@ func (server ProxyServer) ContainerPutHandler(writer http.ResponseWriter, reques
 	rs.BestResponse(writer)
 }
 
-func (server ProxyServer) ContainerDeleteHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) ContainerDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	rs := ResultSet{server.client, nil, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
@@ -246,12 +246,12 @@ func (server ProxyServer) ContainerDeleteHandler(writer http.ResponseWriter, req
 	rs.BestResponse(writer)
 }
 
-func (server ProxyServer) AccountGetHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) AccountGetHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	fmt.Println("ACCOUNT GET?!")
 	http.Error(writer, http.StatusText(http.StatusNotImplemented), http.StatusNotImplemented)
 }
 
-func (server ProxyServer) AccountPutHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) AccountPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
 	rs := ResultSet{server.client, nil, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
@@ -263,7 +263,7 @@ func (server ProxyServer) AccountPutHandler(writer http.ResponseWriter, request 
 	rs.BestResponse(writer)
 }
 
-func (server ProxyServer) AccountDeleteHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) AccountDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
 	rs := ResultSet{server.client, nil, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
@@ -275,7 +275,7 @@ func (server ProxyServer) AccountDeleteHandler(writer http.ResponseWriter, reque
 	rs.BestResponse(writer)
 }
 
-func (server ProxyServer) AuthHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
+func (server ProxyServer) AuthHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	token := make([]byte, 32)
 	for i := range token {
 		token[i] = byte('A' + (rand.Int() % 26))
@@ -291,8 +291,8 @@ func (server ProxyServer) AuthHandler(writer http.ResponseWriter, request *Reque
 
 // access log
 
-func (server ProxyServer) LogRequest(writer *SaveStatusWriter, request *RequestContext) {
-	logline := fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
+func (server ProxyServer) LogRequest(writer *SwiftWriter, request *SwiftRequest) {
+	go server.logger.Info(fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
 		request.RemoteAddr,
 		time.Now().Format("02/Jan/2006:15:04:05 -0700"),
 		request.Method,
@@ -303,8 +303,7 @@ func (server ProxyServer) LogRequest(writer *SaveStatusWriter, request *RequestC
 		request.TransactionId,
 		HeaderGetDefault(request.Header, "User-Agent", "-"),
 		time.Since(request.Start).Seconds(),
-		"-") // TODO: "additional info", probably saved in request?
-	server.logger.Info(logline)
+		"-")) // TODO: "additional info", probably saved in request?
 }
 
 func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -325,9 +324,9 @@ func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			}
 		}
 	}
-	newWriter := &SaveStatusWriter{writer, 500}
-	newRequest := &RequestContext{request, GetTransactionId(), GetTimestamp(), time.Now()}
-	defer server.LogRequest(newWriter, newRequest)
+	newWriter := &SwiftWriter{writer, 500}
+	newRequest := &SwiftRequest{request, GetTransactionId(), GetTimestamp(), time.Now()}
+	defer server.LogRequest(newWriter, newRequest) // log the request after return
 
 	if len(parts) >= 1 && parts[1] == "auth" {
 		server.AuthHandler(newWriter, newRequest, vars)
