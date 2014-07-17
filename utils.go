@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/syslog"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -88,4 +89,12 @@ func GetTimestamp() string {
 
 func GetTransactionId() string {
 	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
+func HeaderGetDefault(h http.Header, key string, dfl string) string {
+	val := h.Get(key)
+	if val == "" {
+		return dfl
+	}
+	return val
 }

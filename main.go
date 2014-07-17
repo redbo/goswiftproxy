@@ -15,6 +15,8 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 )
 
+// ResponseWriter that saves its status - used for logging.
+
 type SaveStatusWriter struct {
 	http.ResponseWriter
 	Status int
@@ -34,10 +36,13 @@ type ProxyServer struct {
 	mc            *memcache.Client
 }
 
+// http.Request that also contains swift-specific info about the request
+
 type RequestContext struct {
 	*http.Request
 	TransactionId string
 	XTimestamp    string
+	Start         time.Time
 }
 
 func (src *RequestContext) CopyRequestHeaders(dst *http.Request) {
@@ -54,35 +59,35 @@ func CopyResponseHeaders(src *http.Response, dst http.ResponseWriter) {
 	}
 }
 
+// object that performs some number of requests asynchronously and aggregates the results
+
 type ResultSet struct {
 	client   *http.Client
 	requests []*http.Request
 	done     []chan int
 }
 
-func _DoRequest(client *http.Client, req *http.Request, done chan int) {
-	resp, err := client.Do(req)
-	if resp != nil {
-		defer resp.Body.Close()
-	}
-	if err != nil {
-		fmt.Println(err.Error())
-		done <- 500
-	} else {
-		if resp.StatusCode/100 == 5 {
-			blah := make([]byte, 8192)
-			length, _ := resp.Body.Read(blah)
-			fmt.Println("Error", string(blah[0:length]))
-		}
-		done <- resp.StatusCode
-	}
-}
-
 func (rs *ResultSet) Do(req *http.Request) {
 	donech := make(chan int)
 	rs.requests = append(rs.requests, req)
 	rs.done = append(rs.done, donech)
-	go _DoRequest(rs.client, req, donech)
+	go func(client *http.Client, req *http.Request, done chan int) {
+		resp, err := client.Do(req)
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		if err != nil {
+			fmt.Println(err.Error())
+			done <- 500
+		} else {
+			if resp.StatusCode/100 == 5 {
+				blah := make([]byte, 8192)
+				length, _ := resp.Body.Read(blah)
+				fmt.Println("Error", string(blah[0:length]))
+			}
+			done <- resp.StatusCode
+		}
+	}(rs.client, req, donech)
 }
 
 func (rs ResultSet) BestResponse(writer http.ResponseWriter) {
@@ -93,6 +98,8 @@ func (rs ResultSet) BestResponse(writer http.ResponseWriter) {
 	response := responses[0] // TODO quorum
 	http.Error(writer, http.StatusText(response), response)
 }
+
+// request handlers
 
 func (server ProxyServer) ObjectGetHandler(writer http.ResponseWriter, request *RequestContext, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
@@ -282,12 +289,22 @@ func (server ProxyServer) AuthHandler(writer http.ResponseWriter, request *Reque
 	http.Error(writer, http.StatusText(http.StatusOK), http.StatusOK)
 }
 
-func GetDefault(h http.Header, key string, dfl string) string {
-	val := h.Get(key)
-	if val == "" {
-		return dfl
-	}
-	return val
+// access log
+
+func (server ProxyServer) LogRequest(writer *SaveStatusWriter, request *RequestContext) {
+	logline := fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
+		request.RemoteAddr,
+		time.Now().Format("02/Jan/2006:15:04:05 -0700"),
+		request.Method,
+		request.URL.Path,
+		writer.Status,
+		HeaderGetDefault(writer.Header(), "Content-Length", "-"),
+		HeaderGetDefault(request.Header, "Referer", "-"),
+		request.TransactionId,
+		HeaderGetDefault(request.Header, "User-Agent", "-"),
+		time.Since(request.Start).Seconds(),
+		"-") // TODO: "additional info", probably saved in request?
+	server.logger.Info(logline)
 }
 
 func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -308,26 +325,23 @@ func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			}
 		}
 	}
-	start := time.Now()
-	newWriter := &SaveStatusWriter{writer, 200}
-	newRequest := &RequestContext{request, GetTransactionId(), GetTimestamp()}
-	var key string
-	var it *memcache.Item
-	var err error
+	newWriter := &SaveStatusWriter{writer, 500}
+	newRequest := &RequestContext{request, GetTransactionId(), GetTimestamp(), time.Now()}
+	defer server.LogRequest(newWriter, newRequest)
 
 	if len(parts) >= 1 && parts[1] == "auth" {
 		server.AuthHandler(newWriter, newRequest, vars)
-		goto LogRequest
+		return
 	} else if val := request.Header.Get("X-Auth-Token"); val == "" {
 		http.Error(writer, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		goto LogRequest
+		return
 	}
 
-	key = fmt.Sprintf("auth/%s/%s", vars["account"], request.Header.Get("X-Auth-Token"))
-	it, err = server.mc.Get(key)
+	key := fmt.Sprintf("auth/%s/%s", vars["account"], request.Header.Get("X-Auth-Token"))
+	it, err := server.mc.Get(key)
 	if err != nil || string(it.Value) != "VALID" {
 		http.Error(writer, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-		goto LogRequest
+		return
 	}
 
 	if len(parts) == 5 && parts[1] == "v1" {
@@ -366,21 +380,6 @@ func (server ProxyServer) ServeHTTP(writer http.ResponseWriter, request *http.Re
 	} else {
 		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 	}
-
-LogRequest:
-	logline := fmt.Sprintf("%s - - [%s] \"%s %s\" %d %s \"%s\" \"%s\" \"%s\" %.4f \"%s\"",
-		request.RemoteAddr,
-		time.Now().Format("02/Jan/2006:15:04:05 -0700"),
-		request.Method,
-		request.URL.Path,
-		newWriter.Status,
-		GetDefault(writer.Header(), "Content-Length", "-"),
-		GetDefault(request.Header, "Referer", "-"),
-		newRequest.TransactionId,
-		GetDefault(request.Header, "User-Agent", "-"),
-		time.Since(start).Seconds(),
-		"-")
-	server.logger.Info(logline) // TODO: "additional info"
 }
 
 func RunServer(conf string) {
