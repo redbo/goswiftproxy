@@ -157,18 +157,8 @@ func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRe
 		req.Header.Set("X-Container-Device", container_devices[i].Device)
 		resultSet.Do(req)
 	}
-	chunk := make([]byte, 65536)
-	for {
-		length, err := request.Body.Read(chunk)
-		if length > 0 {
-			for _, writer := range writers {
-				writer.Write(chunk[0:length])
-			}
-		}
-		if err != nil || length <= 0 {
-			break
-		}
-	}
+	mw := io.MultiWriter(writers[0], writers[1], writers[2])
+	io.Copy(mw, request.Body)
 	for _, writer := range writers {
 		writer.Close()
 	}
