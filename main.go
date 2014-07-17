@@ -62,14 +62,12 @@ func (src *SwiftRequest) CopyRequestHeaders(dst *http.Request) {
 // object that performs some number of requests asynchronously and aggregates the results
 
 type MultiClient struct {
-	client   *http.Client
-	requests []*http.Request
-	done     []chan int
+	client *http.Client
+	done   []chan int
 }
 
 func (mc *MultiClient) Do(req *http.Request) {
 	donech := make(chan int)
-	mc.requests = append(mc.requests, req)
 	mc.done = append(mc.done, donech)
 	go func(client *http.Client, req *http.Request, done chan int) {
 		resp, err := client.Do(req)
@@ -137,7 +135,7 @@ func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRe
 	container_partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	container_devices := server.containerRing.GetNodes(container_partition)
 	var writers []*io.PipeWriter
-	resultSet := MultiClient{server.client, nil, nil}
+	resultSet := MultiClient{server.client, nil}
 	for i, device := range server.objectRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]), Urlencode(vars["obj"]))
@@ -179,7 +177,7 @@ func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRe
 
 func (server ProxyServer) ObjectDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
-	rs := MultiClient{server.client, nil, nil}
+	rs := MultiClient{server.client, nil}
 	for _, device := range server.objectRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]), Urlencode(vars["obj"]))
@@ -222,7 +220,7 @@ func (server ProxyServer) ContainerGetHandler(writer *SwiftWriter, request *Swif
 
 func (server ProxyServer) ContainerPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
-	rs := MultiClient{server.client, nil, nil}
+	rs := MultiClient{server.client, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]))
@@ -235,7 +233,7 @@ func (server ProxyServer) ContainerPutHandler(writer *SwiftWriter, request *Swif
 
 func (server ProxyServer) ContainerDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
-	rs := MultiClient{server.client, nil, nil}
+	rs := MultiClient{server.client, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]))
@@ -253,7 +251,7 @@ func (server ProxyServer) AccountGetHandler(writer *SwiftWriter, request *SwiftR
 
 func (server ProxyServer) AccountPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
-	rs := MultiClient{server.client, nil, nil}
+	rs := MultiClient{server.client, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s", device.Ip, device.Port, device.Device, partition, Urlencode(vars["account"]))
 		req, _ := http.NewRequest(request.Method, url, nil)
@@ -265,7 +263,7 @@ func (server ProxyServer) AccountPutHandler(writer *SwiftWriter, request *SwiftR
 
 func (server ProxyServer) AccountDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
-	rs := MultiClient{server.client, nil, nil}
+	rs := MultiClient{server.client, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s", device.Ip, device.Port, device.Device, partition, Urlencode(vars["account"]))
 		req, _ := http.NewRequest(request.Method, url, nil)
