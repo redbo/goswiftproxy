@@ -62,8 +62,9 @@ func (src *SwiftRequest) CopyRequestHeaders(dst *http.Request) {
 // object that performs some number of requests asynchronously and aggregates the results
 
 type MultiClient struct {
-	client *http.Client
-	done   []chan int
+	client        *http.Client
+	request_count int
+	done          []chan int
 }
 
 func (mc *MultiClient) Do(req *http.Request) {
@@ -86,15 +87,33 @@ func (mc *MultiClient) Do(req *http.Request) {
 			done <- resp.StatusCode
 		}
 	}(mc.client, req, donech)
+	mc.request_count += 1
 }
 
 func (mc MultiClient) BestResponse(writer *SwiftWriter) {
 	var responses []int
-	for _, done := range mc.done {
+	quorum := (mc.request_count / 2) + 1
+	for chanIndex, done := range mc.done {
 		responses = append(responses, <-done)
+		for status_range := 200; status_range <= 400; status_range += 100 {
+			range_count := 0
+			for _, response := range responses {
+				if response >= status_range && response < (status_range+100) {
+					range_count += 1
+					if range_count >= quorum {
+						http.Error(writer, http.StatusText(response), response)
+						go func() { // close any remaining channels
+							for i := chanIndex + 1; i < len(mc.done); i++ {
+								<-mc.done[i]
+							}
+						}()
+						return
+					}
+				}
+			}
+		}
 	}
-	response := responses[0] // TODO quorum logic
-	http.Error(writer, http.StatusText(response), response)
+	http.Error(writer, http.StatusText(500), 500)
 }
 
 // request handlers
@@ -135,7 +154,7 @@ func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRe
 	container_partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
 	container_devices := server.containerRing.GetNodes(container_partition)
 	var writers []*io.PipeWriter
-	resultSet := MultiClient{server.client, nil}
+	resultSet := MultiClient{server.client, 0, nil}
 	for i, device := range server.objectRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]), Urlencode(vars["obj"]))
@@ -167,7 +186,7 @@ func (server ProxyServer) ObjectPutHandler(writer *SwiftWriter, request *SwiftRe
 
 func (server ProxyServer) ObjectDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.objectRing.GetPartition(vars["account"], vars["container"], vars["obj"])
-	rs := MultiClient{server.client, nil}
+	rs := MultiClient{server.client, 0, nil}
 	for _, device := range server.objectRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]), Urlencode(vars["obj"]))
@@ -210,7 +229,7 @@ func (server ProxyServer) ContainerGetHandler(writer *SwiftWriter, request *Swif
 
 func (server ProxyServer) ContainerPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
-	rs := MultiClient{server.client, nil}
+	rs := MultiClient{server.client, 0, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]))
@@ -223,7 +242,7 @@ func (server ProxyServer) ContainerPutHandler(writer *SwiftWriter, request *Swif
 
 func (server ProxyServer) ContainerDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], vars["container"], "")
-	rs := MultiClient{server.client, nil}
+	rs := MultiClient{server.client, 0, nil}
 	for _, device := range server.containerRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s/%s", device.Ip, device.Port, device.Device, partition,
 			Urlencode(vars["account"]), Urlencode(vars["container"]))
@@ -241,7 +260,7 @@ func (server ProxyServer) AccountGetHandler(writer *SwiftWriter, request *SwiftR
 
 func (server ProxyServer) AccountPutHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
-	rs := MultiClient{server.client, nil}
+	rs := MultiClient{server.client, 0, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%d/%s", device.Ip, device.Port, device.Device, partition, Urlencode(vars["account"]))
 		req, _ := http.NewRequest(request.Method, url, nil)
@@ -253,7 +272,7 @@ func (server ProxyServer) AccountPutHandler(writer *SwiftWriter, request *SwiftR
 
 func (server ProxyServer) AccountDeleteHandler(writer *SwiftWriter, request *SwiftRequest, vars map[string]string) {
 	partition := server.containerRing.GetPartition(vars["account"], "", "")
-	rs := MultiClient{server.client, nil}
+	rs := MultiClient{server.client, 0, nil}
 	for _, device := range server.accountRing.GetNodes(partition) {
 		url := fmt.Sprintf("http://%s:%d/%s/%s/%s", device.Ip, device.Port, device.Device, partition, Urlencode(vars["account"]))
 		req, _ := http.NewRequest(request.Method, url, nil)
